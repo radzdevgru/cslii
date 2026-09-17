@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Uruchom jako root: sudo bash make_dns_opsec_lab.sh"
+  exit 1
+fi
+
+LAB_ROOT="/opt/dns-opsec-lab"
+CONF_DIR="$LAB_ROOT/conf"
+ZONE_DIR="$LAB_ROOT/zones"
+LOG_DIR="$LAB_ROOT/logs"
+BIN_DIR="$LAB_ROOT/bin"
+SYSTEMD_DIR="/etc/systemd/system"
+
+echo "[1/12] Tworzę strukturę katalogów..."
+mkdir -p "$CONF_DIR" "$ZONE_DIR" "$LOG_DIR" "$BIN_DIR"
+
+echo "[2/12] Tworzę przykładową konfigurację dnsmasq..."
+cat > "$CONF_DIR/dnsmasq.conf" <<EOF
+port=5353
+listen-address=127.0.0.1
+bind-interfaces
+no-daemon
+log-queries
+log-facility=$LOG_DIR/dnsmasq-live.log
+no-resolv
+
+# Testowi upstreamy do analizy, ale resolver działa lokalnie dla domen labowych
+server=1.1.1.1
+server=9.9.9.9
+
+# Domeny lokalne do ćwiczeń
+address=/intranet.lab.test/127.0.0.10
+address=/backup-node.lab.test/127.0.0.20
+address=/hr-db.lab.test/127.0.0.30
+address=/incident-panel.lab.test/127.0.0.40
+address=/vpn-gateway-internal.lab.test/127.0.0.50
+address=/ops-admin.lab.test/127.0.0.60
+address=/fileserver.lab.test/127.0.0.70
+address=/printer.lab.test/127.0.0.80
+
+# Reverse lookup examples
+ptr-record=10.0.0.127.in-addr.arpa,intranet.lab.test
+ptr-record=20.0.0.127.in-addr.arpa,backup-node.lab.test
+ptr-record=30.0.0.127.in-addr.arpa,hr-db.lab.test
+EOF
+
+echo "[3/12] Tworzę pliki pomocnicze do analizy konfiguracji..."
+cat > "$LAB_ROOT/resolv.conf.example" <<'EOF'
+# Example training file - not active system config
+search corp.internal ops.internal lab.test
+nameserver 127.0.0.53
+options edns0 trust-ad
+EOF
+
+cat > "$LAB_ROOT/networkmanager-dns-example.txt" <<'EOF'
+GENERAL.DEVICE:                         eth0
+IP4.DNS[1]:                             10.0.0.2
+IP4.DNS[2]:                             1.1.1.1
+IP4.DOMAIN[1]:                          corp.internal
+IP4.DOMAIN[2]:                          ops.internal
+EOF
+
+cat > "$LAB_ROOT/hosts.example" <<'EOF'
+127.0.0.1 localhost
+127.0.1.1 ws-01
+127.0.0.10 intranet.lab.test intranet
+127.0.0.20 backup-node.lab.test backup-node
+127.0.0.30 hr-db.lab.test hr-db
+EOF
+
+echo "[4/12] Tworzę przykładowe logi DNS do ćwiczeń..."
+cat > "$LOG_DIR/dns-queries-sample.log" <<'EOF'
+2026-04-20T08:00:01 query[A] intranet.lab.test from 127.0.0.1
+2026-04-20T08:00:03 query[A] backup-node.lab.test from 127.0.0.1
+2026-04-20T08:00:05 query[A] hr-db.lab.test from 127.0.0.1
+2026-04-20T08:00:08 query[A] printer.corp.internal from 127.0.0.1
+2026-04-20T08:00:11 query[A] fileserver.ops.internal from 127.0.0.1
+2026-04-20T08:00:14 query[A] unknown-temp-host from 127.0.0.1
+2026-04-20T08:00:15 reply unknown-temp-host is NXDOMAIN
+2026-04-20T08:00:20 query[A] incident-panel.lab.test from 127.0.0.1
+2026-04-20T08:00:25 query[A] vpn-gateway-internal.lab.test from 127.0.0.1
+2026-04-20T08:00:30 query[A] ops-admin.lab.test from 127.0.0.1
+2026-04-20T08:00:31 query[A] ops-admin.lab.test from 127.0.0.1
+2026-04-20T08:00:32 query[A] ops-admin.lab.test from 127.0.0.1
+2026-04-20T08:00:33 query[A] ops-admin.lab.test from 127.0.0.1
+2026-04-20T08:00:40 query[TXT] example.com from 127.0.0.1
+2026-04-20T08:00:50 query[MX] example.com from 127.0.0.1
+EOF
+
+cat > "$LOG_DIR/resolved-journal-sample.log" <<'EOF'
+Apr 20 08:10:01 ws-01 systemd-resolved[612]: Using degraded feature set UDP instead of TCP for DNS server 10.0.0.2.
+Apr 20 08:10:03 ws-01 systemd-resolved[612]: Server returned error NXDOMAIN, mitigating potential leak for name backup-node
+Apr 20 08:10:10 ws-01 systemd-resolved[612]: Switching to fallback DNS server 1.1.1.1.
+Apr 20 08:10:20 ws-01 systemd-resolved[612]: Detected attempt to resolve short name hr-db via search domain corp.internal
+Apr 20 08:10:30 ws-01 systemd-resolved[612]: Query burst detected for ops-admin.lab.test
+EOF
+
+echo "[5/12] Tworzę checklistę i notatki dla kursanta..."
+cat > "$LAB_ROOT/README_LAB.txt" <<'EOF'
+DNS OPSEC LAB
+
+Local test resolver:
+  127.0.0.1:5353
+
+Przykładowe nazwy do testów:
+  intranet.lab.test
+  backup-node.lab.test
+  hr-db.lab.test
+  incident-panel.lab.test
+  vpn-gateway-internal.lab.test
+  ops-admin.lab.test
+  printer.lab.test
+  fileserver.lab.test
+
+Pliki do analizy:
+  /opt/dns-opsec-lab/resolv.conf.example
+  /opt/dns-opsec-lab/networkmanager-dns-example.txt
+  /opt/dns-opsec-lab/hosts.example
+  /opt/dns-opsec-lab/logs/dns-queries-sample.log
+  /opt/dns-opsec-lab/logs/resolved-journal-sample.log
+
+Cele:
+- rozpoznać resolver
+- zrozumieć search domains
+- znaleźć nazwy wrażliwe
+- odróżnić nazwy wewnętrzne od publicznych
+- przeanalizować wzorce zapytań i NXDOMAIN
+EOF
+
+cat > "$LAB_ROOT/dns-opsec-checklist-template.txt" <<'EOF'
+1. Jaki resolver jest używany?
+2. Jakie search domains są aktywne?
+3. Czy krótkie nazwy powodują niepotrzebne zapytania?
+4. Jakie nazwy są operacyjnie wrażliwe?
+5. Czy występują NXDOMAIN i bursty zapytań?
+6. Czy upstream DNS jest zaufany i uzasadniony?
+7. Czy istnieje lokalny cache/stub resolver?
+8. Jak ograniczyć wyciek nazw wewnętrznych?
+EOF
+
+echo "[6/12] Tworzę skrypt pomocniczy do odpytywania lokalnego DNS..."
+cat > "$BIN_DIR/test-dns-lab.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+DNS_SERVER="127.0.0.1"
+DNS_PORT="5353"
+
+for name in \
+  intranet.lab.test \
+  backup-node.lab.test \
+  hr-db.lab.test \
+  incident-panel.lab.test \
+  vpn-gateway-internal.lab.test \
+  ops-admin.lab.test \
+  printer.lab.test \
+  fileserver.lab.test \
+  unknown-temp-host
+do
+  echo "==== $name ===="
+  dig @"$DNS_SERVER" -p "$DNS_PORT" "$name" +short
+  echo
+done
+EOF
+chmod +x "$BIN_DIR/test-dns-lab.sh"
+
+echo "[7/12] Sprawdzam, czy dnsmasq jest zainstalowany..."
+if ! command -v dnsmasq >/dev/null 2>&1; then
+  echo "Instaluję dnsmasq..."
+  apt-get update -y
+  apt-get install -y dnsmasq dnsutils
+fi
+
+echo "[8/12] Tworzę usługę systemd dla lokalnego DNS lab..."
+cat > "$SYSTEMD_DIR/dns-opsec-lab.service" <<EOF
+[Unit]
+Description=DNS OPSEC Lab Resolver
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --conf-file=$CONF_DIR/dnsmasq.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[9/12] Przeładowuję systemd i uruchamiam usługę..."
+systemctl daemon-reload
+systemctl enable --now dns-opsec-lab.service
+
+echo "[10/12] Sprawdzam status usługi..."
+systemctl status dns-opsec-lab.service --no-pager || true
+
+echo "[11/12] Wykonuję testowe zapytania..."
+"$BIN_DIR/test-dns-lab.sh" || true
+
+echo "[12/12] Gotowe."
+echo
+echo "Resolver labowy działa na: 127.0.0.1:5353"
+echo
+echo "Przykładowe testy:"
+echo "  dig @127.0.0.1 -p 5353 intranet.lab.test"
+echo "  dig @127.0.0.1 -p 5353 backup-node.lab.test"
+echo "  host intranet.lab.test 127.0.0.1#5353"
+echo
+echo "Pliki do analizy:"
+echo "  $LAB_ROOT/README_LAB.txt"
+echo "  $LAB_ROOT/resolv.conf.example"
+echo "  $LAB_ROOT/networkmanager-dns-example.txt"
+echo "  $LAB_ROOT/hosts.example"
+echo "  $LOG_DIR/dns-queries-sample.log"
+echo "  $LOG_DIR/resolved-journal-sample.log"
